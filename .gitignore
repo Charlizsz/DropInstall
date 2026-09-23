@@ -1,0 +1,20 @@
+# Local build products and diagnostics
+/build/
+/dist/
+/.build/
+/DerivedData/
+*.app/
+*.dSYM/
+*.swiftmodule
+*.swiftdoc
+*.swiftsourceinfo
+
+# Disk images, packages, and local archives
+*.dmg
+*.iso
+*.zip
+
+# macOS and editor files
+.DS_Store
+*.swp
+*.xcuserdata/
