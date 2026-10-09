@@ -256,6 +256,7 @@ struct InstallerTests {
         check(!String(decoding: info, as: UTF8.self).contains(root.path), "all fixture disks detached")
         try await NestedImageTests.run()
         try await ImageInputTests.run()
+        try await RunningAppTests.run()
         print("All DropInstall integration tests passed. No apps were launched or installed into /Applications.")
     }
 

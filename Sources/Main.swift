@@ -6,10 +6,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let model = AppModel()
     private var window: NSWindow?
     private var provider: ServicesProvider?
+    private var runningAppAlert: NSAlert?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         createMenu()
         model.onRequestDecision = { [weak self] in self?.showWindow() }
+        model.onRunningAppConfirmation = { [weak self] target in
+            guard let self else { return false }
+            return await self.confirmQuitAndUpdate(target)
+        }
+        model.onCancelRunningAppConfirmation = { [weak self] in
+            guard let alert = self?.runningAppAlert else { return }
+            alert.window.sheetParent?.endSheet(alert.window, returnCode: .abort)
+        }
         provider = ServicesProvider { [weak self] urls in
             self?.showWindow()
             self?.model.add(urls, startImmediately: true)
@@ -20,6 +29,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Optional launch-time queue import; never starts an install implicitly.
         if CommandLine.arguments.dropFirst().first == "--enqueue" {
             model.add(CommandLine.arguments.dropFirst(2).map { URL(fileURLWithPath: $0) })
+        }
+    }
+
+    private func confirmQuitAndUpdate(_ target: URL) async -> Bool {
+        showWindow()
+        guard let window else { return false }
+        // Let the batch-confirmation sheet finish dismissing before presenting this one.
+        while window.attachedSheet != nil {
+            guard !model.stopRequested, !model.quitRequested else { return false }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        guard !model.stopRequested, !model.quitRequested else { return false }
+        let alert = NSAlert()
+        alert.messageText = "\(target.deletingPathExtension().lastPathComponent) 正在运行"
+        alert.informativeText = "是否帮你正常退出，更新成功后再重新打开？如果有未保存内容，请先处理该应用的提示。不会强制退出。"
+        alert.addButton(withTitle: "退出并更新")
+        alert.addButton(withTitle: "暂不更新")
+        runningAppAlert = alert
+        return await withCheckedContinuation { continuation in
+            alert.beginSheetModal(for: window) { [weak self] response in
+                self?.runningAppAlert = nil
+                continuation.resume(returning: response == .alertFirstButtonReturn)
+            }
         }
     }
 

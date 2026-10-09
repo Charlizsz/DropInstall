@@ -123,7 +123,7 @@ struct InstallerView: View {
         VStack(alignment: .leading, spacing: 18) {
             Label("是否批量覆盖 \(model.conflicts.count) 个重名应用？", systemImage: "square.on.square")
                 .font(.system(size: 20, weight: .semibold))
-            Text("以下应用重名，原应用尚未更改。确认后才会复制新版并覆盖，旧版移入废纸篓；正在运行的应用会继续待定。")
+            Text("以下应用重名，原应用尚未更改。确认后才会复制新版并覆盖，旧版移入废纸篓；若应用正在运行，会再询问是否退出并在更新后重新打开。")
                 .font(.system(size: 13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {

@@ -107,6 +107,7 @@ enum SystemCommand {
 }
 
 struct InstallReport: Sendable {
+    var reopenWarnings: [String] = []
     var installed: [String] = []
     var skipped: [String] = []
     var pending: [PendingReplacement] = []
@@ -127,6 +128,7 @@ struct InstallReport: Sendable {
 
     var detail: String {
         var lines: [String] = []
+        lines += reopenWarnings
         if !nestedImages.isEmpty { lines.append("已查找内层映像：" + nestedImages.joined(separator: "、")) }
         if !installed.isEmpty { lines.append("已安装：" + installed.joined(separator: "、")) }
         if !pending.isEmpty { lines.append("重名待确认：" + pending.map(\.name).joined(separator: "、")) }

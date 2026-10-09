@@ -16,7 +16,9 @@ struct InstallJob: Identifiable {
 final class AppModel: ObservableObject {
     @Published var jobs: [InstallJob] = []
     @Published var busy = false
-    @Published var stopRequested = false
+    @Published var stopRequested = false {
+        didSet { if stopRequested { onCancelRunningAppConfirmation?() } }
+    }
     @Published var inputMessage: String?
     @Published var showConflictSheet = false
     @Published var searchRules = ImageSearchRuleStore.load()
@@ -24,8 +26,15 @@ final class AppModel: ObservableObject {
     private(set) var quitRequested = false
     var onRequestDecision: (() -> Void)?
     var onReadyToQuit: (() -> Void)?
+    var onRunningAppConfirmation: ((URL) async -> Bool)?
+    var onCancelRunningAppConfirmation: (() -> Void)?
+    private let runningApps: RunningAppUpdater
+    private var reopenIntents: Set<UUID> = []
     private let destinationOverride: URL?
-    init(destination: URL? = nil) { destinationOverride = destination }
+    init(destination: URL? = nil, runningApps: RunningAppUpdater = RunningAppUpdater()) {
+        destinationOverride = destination
+        self.runningApps = runningApps
+    }
     @Published var userOnly = UserDefaults.standard.bool(forKey: "installForCurrentUser") {
         didSet { UserDefaults.standard.set(userOnly, forKey: "installForCurrentUser") }
     }
@@ -176,6 +185,7 @@ final class AppModel: ObservableObject {
             do { try DiskInstaller.discard(item.conflict) }
             catch { jobs[i].report?.problems.append(error.localizedDescription) }
             jobs[i].report?.pending.removeAll { $0.id == item.id }
+            reopenIntents.remove(item.id)
             jobs[i].report?.replacementProblems.removeValue(forKey: item.id)
             jobs[i].report?.skipped.append(item.conflict.name)
             refreshStatus(i)
@@ -206,11 +216,27 @@ final class AppModel: ObservableObject {
                 jobs[i].state = .running
                 jobs[i].status = "正在准备已确认的覆盖项目…"
                 var selected: [PendingReplacement] = []
+                var reopenAfterUpdate: Set<UUID> = []
                 for candidate in approved where candidate.jobID == item.jobID {
-                    if let reason = Self.replacementBlockReason(candidate.conflict.target) {
-                        jobs[i].report?.replacementProblems[candidate.id] = reason
-                    } else { selected.append(candidate.conflict) }
+                    if stopRequested { break }
+                    let target = candidate.conflict.target
+                    if target.resolvingSymlinksInPath().standardizedFileURL == Bundle.main.bundleURL.resolvingSymlinksInPath().standardizedFileURL {
+                        jobs[i].report?.replacementProblems[candidate.id] = "DropInstall 自身需退出后用 Finder 手动更新。"
+                        continue
+                    }
+                    let preparation = await runningApps.prepare(target, confirm: { [weak self] target in
+                        guard let self, !self.stopRequested, !self.quitRequested else { return false }
+                        return await self.onRunningAppConfirmation?(target) ?? false
+                    }, shouldStop: { self.stopRequested || self.quitRequested }, progress: { self.jobs[i].status = $0 })
+                    switch preparation {
+                    case .ready(let reopen):
+                        selected.append(candidate.conflict)
+                        if reopen { reopenIntents.insert(candidate.id) }
+                        if reopenIntents.contains(candidate.id) { reopenAfterUpdate.insert(candidate.id) }
+                    case .blocked(let reason): jobs[i].report?.replacementProblems[candidate.id] = reason
+                    }
                 }
+                if stopRequested { refreshStatus(i); break }
                 guard !selected.isEmpty else { refreshStatus(i); continue }
                 let selectedConflicts = selected
                 let jobID = item.jobID
@@ -234,6 +260,18 @@ final class AppModel: ObservableObject {
                         jobs[i].report?.replacementProblems[conflict.id] = result.replacementProblems[conflict.id]
                             ?? (result.problems.isEmpty ? "未能完成覆盖，请重试。" : result.problems.joined(separator: "\n"))
                     }
+                }
+                // Reopen each target only after its own replacement succeeded.
+                // A sibling failure must neither reopen a failed app nor suppress a successful one.
+                var reopenedTargets: Set<URL> = []
+                for conflict in selected where reopenAfterUpdate.contains(conflict.id) && completed.contains(conflict.id) {
+                    let target = conflict.target.resolvingSymlinksInPath().standardizedFileURL
+                    guard reopenedTargets.insert(target).inserted else { continue }
+                    jobs[i].status = "正在重新打开 \(conflict.name)…"
+                    if let warning = await runningApps.reopen(target, replacementSucceeded: true) {
+                        jobs[i].report?.reopenWarnings.append(warning)
+                    }
+                    reopenIntents.remove(conflict.id)
                 }
                 jobs[i].report?.backupsInTrash += result.backupsInTrash
                 jobs[i].report?.ejected = result.ejected
