@@ -78,9 +78,8 @@ struct InstallerTests {
         check(replaceItem.stagedApp == nil && replaceItem.source != nil && !preflightChildren.contains { $0.hasPrefix(".DropInstall-") }, "conflict detected without copying or staging app")
         let replacement = DiskInstaller.replaceDeferred([replaceItem])
         check(replacement.problems.isEmpty && replacement.completedReplacements == [replaceItem.id] && !fm.fileExists(atPath: sentinel.path), "confirmed replacement swaps entire bundle")
-        check(replacement.backupsInTrash.count == 1 && fm.fileExists(atPath: replacement.backupsInTrash[0].appendingPathComponent("keep-me").path), "old application recoverable in Trash")
-        // Remove only the test fixture this test just moved to Trash.
-        for trash in replacement.backupsInTrash { try fm.removeItem(at: trash) }
+        let afterReplacement = try fm.contentsOfDirectory(atPath: destination.path)
+        check(!afterReplacement.contains { $0.hasPrefix(".DropInstall-") }, "old bundle and staging directory are deleted after replacement")
         let keptIdentity = try FileIdentity.read(keepItem.target)
         check(keptIdentity == unapprovedIdentity, "confirming one app does not copy or replace an unapproved sibling")
         try DiskInstaller.discard(keepItem)
@@ -198,9 +197,7 @@ struct InstallerTests {
         let newIdentities = try replacementTargets.map { try FileIdentity.read($0) }
         check(!batch.busy && batch.conflicts.isEmpty && batch.jobs[0].state == .installed && batch.jobs[0].report?.installed.count == 2, "one confirmation replaces the entire pending batch")
         check(zip(oldIdentities, newIdentities).allSatisfy { $0 != $1 }, "batch replacement publishes staged bundles")
-        let backups = batch.jobs.flatMap { $0.report?.backupsInTrash ?? [] }
-        check(backups.count == 2 && backups.allSatisfy { fm.fileExists(atPath: $0.path) }, "batch old versions are recoverable in Trash")
-        for backup in backups { try fm.removeItem(at: backup) }
+        check(batch.jobs.allSatisfy { $0.report?.detail.contains("旧版已移入废纸篓") == false }, "replacement report no longer promises old versions in Trash")
         let trashedImage = batch.jobs[0].report?.imageInTrash
         check(trashedImage != nil && !fm.fileExists(atPath: image.path) && fm.fileExists(atPath: trashedImage!.path), "DMG trashed only after all replacements succeed")
         try fm.moveItem(at: trashedImage!, to: image)

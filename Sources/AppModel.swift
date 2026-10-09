@@ -273,7 +273,6 @@ final class AppModel: ObservableObject {
                     }
                     reopenIntents.remove(conflict.id)
                 }
-                jobs[i].report?.backupsInTrash += result.backupsInTrash
                 jobs[i].report?.ejected = result.ejected
                 if !result.problems.isEmpty && completed.count == selected.count {
                     jobs[i].report?.problems += result.problems

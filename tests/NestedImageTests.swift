@@ -6,8 +6,6 @@ enum NestedImageTests {
         let root = fm.temporaryDirectory.appendingPathComponent("DropInstall-nested-tests-\(UUID().uuidString)")
         try fm.createDirectory(at: root, withIntermediateDirectories: false)
         defer { try? fm.removeItem(at: root) }
-        var trashToClean: [URL] = []
-        defer { for url in trashToClean { try? fm.removeItem(at: url) } }
         func check(_ value: @autoclosure () -> Bool, _ name: String) {
             precondition(value(), name)
             print("PASS: \(name)")
@@ -90,7 +88,6 @@ enum NestedImageTests {
         try await wait(model)
         let replaced = model.jobs[0].report!
         check(model.conflicts.isEmpty && replaced.installed.count == 1 && replaced.imageInTrash != nil, "batch overwrite of nested app trashes the outer DMG")
-        trashToClean += replaced.backupsInTrash
         try fm.moveItem(at: replaced.imageInTrash!, to: outer)
 
         let mixedSource = try folder("mixed-source/Manual Install")

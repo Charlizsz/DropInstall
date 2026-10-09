@@ -42,7 +42,6 @@ struct PendingReplacement: Identifiable, Sendable {
 
 struct ReplacementResult: Sendable {
     var warning: String?
-    var oldAppInTrash: URL?
 }
 
 struct InstallFailure: LocalizedError {
@@ -113,7 +112,6 @@ struct InstallReport: Sendable {
     var pending: [PendingReplacement] = []
     var problems: [String] = []
     var replacementProblems: [UUID: String] = [:]
-    var backupsInTrash: [URL] = []
     var ejected = false
     var imageIdentity: FileIdentity?
     var imageInTrash: URL?
@@ -133,7 +131,6 @@ struct InstallReport: Sendable {
         if !installed.isEmpty { lines.append("已安装：" + installed.joined(separator: "、")) }
         if !pending.isEmpty { lines.append("重名待确认：" + pending.map(\.name).joined(separator: "、")) }
         if !skipped.isEmpty { lines.append("已保留现有版本：" + skipped.joined(separator: "、")) }
-        if !backupsInTrash.isEmpty { lines.append("覆盖前的旧版已移入废纸篓") }
         lines += problems
         lines += replacementProblems.values.sorted()
         if ejected { lines.append(imageInTrash == nil ? "磁盘已弹出 · 原 DMG 已保留" : "磁盘已弹出 · DMG 已移入废纸篓") }
@@ -292,7 +289,6 @@ struct DiskInstaller: Sendable {
                             let result = try Self.replace(prepared)
                             report.completedReplacements.append(approval.id)
                             report.installed.append(app.lastPathComponent)
-                            if let backup = result.oldAppInTrash { report.backupsInTrash.append(backup) }
                             if let warning = result.warning { report.problems.append(warning) }
                         } catch {
                             try? Self.discard(prepared)
@@ -318,7 +314,6 @@ struct DiskInstaller: Sendable {
                 report.installed += child.installed
                 report.pending += child.pending
                 report.completedReplacements += child.completedReplacements
-                report.backupsInTrash += child.backupsInTrash
                 report.replacementProblems.merge(child.replacementProblems) { _, new in new }
                 report.problems += child.problems.map { "\(inner.lastPathComponent)：\($0)" }
                 childrenEjected = childrenEjected && child.ejected
@@ -385,7 +380,6 @@ struct DiskInstaller: Sendable {
                     let replacement = try replace(approval)
                     result.completedReplacements.append(approval.id)
                     result.installed.append(approval.name)
-                    if let backup = replacement.oldAppInTrash { result.backupsInTrash.append(backup) }
                     if let warning = replacement.warning { result.problems.append(warning) }
                 } catch { result.replacementProblems[approval.id] = error.localizedDescription }
             }
@@ -402,7 +396,6 @@ struct DiskInstaller: Sendable {
                                                  replacementCheck: replacementCheck, originalImageIdentity: source.imageIdentity)
             result.installed += prepared.installed
             result.completedReplacements += prepared.completedReplacements
-            result.backupsInTrash += prepared.backupsInTrash
             result.problems += prepared.problems
             result.replacementProblems.merge(prepared.replacementProblems) { _, new in new }
             result.ejected = prepared.ejected
@@ -550,8 +543,7 @@ struct DiskInstaller: Sendable {
     }
 
     /// Swap whole bundles atomically: copy failures cannot damage the existing app.
-    /// After a successful swap the stage contains the OLD app, which must never be
-    /// deleted by the normal staging cleanup if moving it to Trash fails.
+    /// Delete the old bundle from staging only after the new bundle is in place.
     static func replace(_ conflict: PendingReplacement) throws -> ReplacementResult {
         guard let stagedApp = conflict.stagedApp, let stagedIdentity = conflict.stagedIdentity else {
             throw InstallFailure(message: "此项目尚未复制，请先确认批量覆盖。")
@@ -571,12 +563,11 @@ struct DiskInstaller: Sendable {
         }
         guard status == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         do {
-            var trashedURL: NSURL?
-            try FileManager.default.trashItem(at: stagedApp, resultingItemURL: &trashedURL)
+            try FileManager.default.removeItem(at: stagedApp)
             try? FileManager.default.removeItem(at: stagedApp.deletingLastPathComponent())
-            return ReplacementResult(oldAppInTrash: trashedURL as URL?)
+            return ReplacementResult()
         } catch {
-            return ReplacementResult(warning: "新版已安装；旧版未能移入废纸篓，保留在：\(stagedApp.path)")
+            return ReplacementResult(warning: "新版已安装；旧版临时文件未能清理，请手动删除：\(stagedApp.path)")
         }
     }
 

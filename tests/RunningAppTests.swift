@@ -101,7 +101,6 @@ enum RunningAppTests {
         m.onRunningAppConfirmation = { _ in true }
         m.replaceAll(); try await wait(m)
         check(m.conflicts.isEmpty && modelOpens == 1 && process.requests == 1, "queue quits then replaces then reopens once")
-        trash += m.jobs.flatMap { $0.report?.backupsInTrash ?? [] }
         if let imageTrash = m.jobs[0].report?.imageInTrash { trash.append(imageTrash) }
 
         let (d2, i2, c2) = try fixture("Declined")
@@ -125,7 +124,6 @@ enum RunningAppTests {
         try fm.removeItem(at: c3.target); try fm.moveItem(at: original, to: c3.target)
         m3.replaceAll(); try await wait(m3)
         check(m3.conflicts.isEmpty && retryOpens == 1, "successful retry remembers requested relaunch")
-        trash += m3.jobs.flatMap { $0.report?.backupsInTrash ?? [] }
         if let imageTrash = m3.jobs[0].report?.imageInTrash { trash.append(imageTrash) }
     }
 }
