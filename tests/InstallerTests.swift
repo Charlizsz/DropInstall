@@ -52,9 +52,38 @@ struct InstallerTests {
         check(Set(apps.map(\.lastPathComponent)) == Set([first.lastPathComponent, second.lastPathComponent]), "find wrapper apps; ignore symlinks and nested helpers")
         check(!DiskInstaller.isInside(URL(fileURLWithPath: root.path + "-other/app"), root: root), "path prefix boundary")
 
+        // The payload and its enclosing download deliberately have different metadata.
+        let appQuarantine = "0081;00000001;OriginalAppMetadata;"
+        _ = try SystemCommand.checked("/usr/bin/xattr", ["-w", "com.apple.quarantine", appQuarantine, first.path])
+
+        let directDestination = root.appendingPathComponent("DirectApplications")
+        try fm.createDirectory(at: directDestination, withIntermediateDirectories: false)
+        let directInstaller = DiskInstaller(destination: directDestination)
+        _ = try directInstaller.installApplication(second)
+        let directTarget = directDestination.appendingPathComponent(second.lastPathComponent)
+        let untaggedCopy = try SystemCommand.run("/usr/bin/xattr", ["-p", "com.apple.quarantine", directTarget.path])
+        check(untaggedCopy.status != 0, "plain copy does not invent a quarantine attribute")
+        _ = try SystemCommand.checked("/usr/bin/xattr", ["-w", "com.apple.quarantine", "0081;00000002;OldInstalledApp;", directTarget.path])
+        let prepared = try directInstaller.installApplication(second, approvedIdentity: FileIdentity.read(directTarget))!
+        _ = try DiskInstaller.replace(prepared)
+        let replacedMetadata = try SystemCommand.run("/usr/bin/xattr", ["-p", "com.apple.quarantine", directTarget.path])
+        check(replacedMetadata.status != 0, "whole-bundle overwrite does not carry old installation metadata into an untagged payload")
+
+        // Use ordinary system copying as the reference: macOS may normalize
+        // quarantine fields even when no installer-specific metadata is written.
+        let referenceCopy = root.appendingPathComponent("ReferenceCopy.app")
+        try fm.copyItem(at: first, to: referenceCopy)
+        let referenceMetadata = try SystemCommand.checked("/usr/bin/xattr", ["-p", "com.apple.quarantine", referenceCopy.path])
+        _ = try directInstaller.installApplication(first)
+        let directMetadata = try SystemCommand.checked("/usr/bin/xattr", ["-p", "com.apple.quarantine", directDestination.appendingPathComponent(first.lastPathComponent).path])
+        check(directMetadata == referenceMetadata, "installed metadata matches ordinary system copying")
+
         let image = try makeImage("测试 安装 '$`", source: source)
         let quarantine = "0081;00000000;DropInstallTests;"
         _ = try SystemCommand.checked("/usr/bin/xattr", ["-w", "com.apple.quarantine", quarantine, image.path])
+        // DiskImages can normalize quarantine while constructing/mounting an image.
+        // Compare with the actual mounted payload, not the pre-packaging directory.
+        let mountedQuarantine = try Self.payloadQuarantine(image, appName: first.lastPathComponent)
         let report = installer.install(image)
         print(report.detail)
         check(report.problems.isEmpty && report.installed.count == 2 && report.ejected, "real DMG: mount, copy two apps, eject")
@@ -64,7 +93,7 @@ struct InstallerTests {
         let installedData = try Data(contentsOf: installed.appendingPathComponent("Contents/MacOS/TestApp"))
         check(installedData == Data("#!/bin/sh\nexit 0\n".utf8), "copied executable bytes match")
         let copiedQuarantine = try SystemCommand.checked("/usr/bin/xattr", ["-p", "com.apple.quarantine", installed.path])
-        check(String(decoding: copiedQuarantine, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) == quarantine, "DMG quarantine propagated")
+        check(String(decoding: copiedQuarantine, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) == mountedQuarantine, "mounted payload quarantine preserved without overwriting it with DMG quarantine")
         let sentinel = installed.appendingPathComponent("keep-me")
         try Data("original".utf8).write(to: sentinel)
         let again = installer.install(image)
@@ -80,6 +109,8 @@ struct InstallerTests {
         check(replacement.problems.isEmpty && replacement.completedReplacements == [replaceItem.id] && !fm.fileExists(atPath: sentinel.path), "confirmed replacement swaps entire bundle")
         let afterReplacement = try fm.contentsOfDirectory(atPath: destination.path)
         check(!afterReplacement.contains { $0.hasPrefix(".DropInstall-") }, "old bundle and staging directory are deleted after replacement")
+        let replacementQuarantine = try SystemCommand.checked("/usr/bin/xattr", ["-p", "com.apple.quarantine", replaceItem.target.path])
+        check(String(decoding: replacementQuarantine, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) == mountedQuarantine, "DMG overwrite preserves payload metadata unchanged")
         let keptIdentity = try FileIdentity.read(keepItem.target)
         check(keptIdentity == unapprovedIdentity, "confirming one app does not copy or replace an unapproved sibling")
         try DiskInstaller.discard(keepItem)
@@ -255,6 +286,20 @@ struct InstallerTests {
         try await ImageInputTests.run()
         try await RunningAppTests.run()
         print("All DropInstall integration tests passed. No apps were launched or installed into /Applications.")
+    }
+
+    static func payloadQuarantine(_ image: URL, appName: String) throws -> String {
+        let fm = FileManager.default
+        let mountRoot = fm.temporaryDirectory.appendingPathComponent("DropInstall-metadata-baseline-\(UUID().uuidString)")
+        try fm.createDirectory(at: mountRoot, withIntermediateDirectories: false)
+        defer { try? fm.removeItem(at: mountRoot) }
+        let data = try SystemCommand.checked("/usr/bin/hdiutil", ["attach", image.path, "-readonly", "-nobrowse", "-noautoopen", "-mountroot", mountRoot.path, "-plist"])
+        let plist = try PropertyListSerialization.propertyList(from: data, format: nil) as! [String: Any]
+        let entities = plist["system-entities"] as! [[String: Any]]
+        let volume = entities.compactMap { $0["mount-point"] as? String }.first!
+        defer { _ = try? SystemCommand.checked("/usr/bin/hdiutil", ["detach", volume]) }
+        let attribute = try SystemCommand.checked("/usr/bin/xattr", ["-p", "com.apple.quarantine", URL(fileURLWithPath: volume).appendingPathComponent(appName).path])
+        return String(decoding: attribute, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     @MainActor static func checkNoEarlyPrompt(_ model: AppModel) {

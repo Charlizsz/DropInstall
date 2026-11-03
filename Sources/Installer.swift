@@ -190,11 +190,11 @@ struct DiskInstaller: Sendable {
     /// Serial callers only. Never executes the downloaded app or changes Gatekeeper settings.
     func install(_ imageURL: URL, progress: @Sendable (String) -> Void = { _ in }) -> InstallReport {
         var remainingImages = Self.maximumImageCount
-        let report = processImage(imageURL, quarantineSource: imageURL, chain: [], approvals: nil, depth: 0, remainingImages: &remainingImages, progress: progress)
+        let report = processImage(imageURL, rootImageURL: imageURL, chain: [], approvals: nil, depth: 0, remainingImages: &remainingImages, progress: progress)
         return Self.finishImage(imageURL, report: report)
     }
 
-    private func processImage(_ imageURL: URL, quarantineSource: URL, chain: [ImageMember],
+    private func processImage(_ imageURL: URL, rootImageURL: URL, chain: [ImageMember],
                               approvals: [PendingReplacement]?, depth: Int,
                               remainingImages: inout Int, progress: @Sendable (String) -> Void,
                               replacementCheck: @Sendable (URL) -> String? = { _ in nil },
@@ -275,14 +275,14 @@ struct DiskInstaller: Sendable {
                 let approval = approvals?.first { $0.source?.imageChain == chain && $0.source?.application == member }
                 progress(approval == nil ? "正在检查 \(app.lastPathComponent)…" : "正在复制并覆盖 \(app.lastPathComponent)…")
                 do {
-                    let source = DeferredApplication(imageURL: quarantineSource, imageIdentity: originalImageIdentity ?? report.imageIdentity!, imageChain: chain, application: member)
+                    let source = DeferredApplication(imageURL: rootImageURL, imageIdentity: originalImageIdentity ?? report.imageIdentity!, imageChain: chain, application: member)
                     if let approval {
                         if let reason = replacementCheck(approval.target) { throw InstallFailure(message: reason) }
-                        guard let prepared = try installApplication(app, imageURL: quarantineSource, source: source, approvedIdentity: approval.originalIdentity) else {
+                        guard let prepared = try installApplication(app, source: source, approvedIdentity: approval.originalIdentity) else {
                             throw InstallFailure(message: "无法准备待覆盖应用。")
                         }
                         do {
-                            guard try FileIdentity.read(quarantineSource) == source.imageIdentity else {
+                            guard try FileIdentity.read(rootImageURL) == source.imageIdentity else {
                                 throw InstallFailure(message: "原 DMG 在复制期间发生变化，已保留现有应用。")
                             }
                             if let reason = replacementCheck(approval.target) { throw InstallFailure(message: reason) }
@@ -294,7 +294,7 @@ struct DiskInstaller: Sendable {
                             try? Self.discard(prepared)
                             throw error
                         }
-                    } else if let conflict = try installApplication(app, imageURL: quarantineSource, source: source, progress: progress) {
+                    } else if let conflict = try installApplication(app, source: source, progress: progress) {
                         report.pending.append(conflict)
                         progress("\(app.lastPathComponent) 重名，已待定（确认后才复制）")
                     } else {
@@ -306,7 +306,7 @@ struct DiskInstaller: Sendable {
                 }
             }
             for (inner, member) in nested {
-                let child = processImage(inner, quarantineSource: quarantineSource, chain: chain + [member], approvals: approvals, depth: depth + 1,
+                let child = processImage(inner, rootImageURL: rootImageURL, chain: chain + [member], approvals: approvals, depth: depth + 1,
                                          remainingImages: &remainingImages, progress: progress, replacementCheck: replacementCheck,
                                          originalImageIdentity: originalImageIdentity ?? report.imageIdentity)
                 report.nestedImages.append(inner.lastPathComponent)
@@ -391,7 +391,7 @@ struct DiskInstaller: Sendable {
             }
             let installer = DiskInstaller(destination: first.target.deletingLastPathComponent())
             var remaining = maximumImageCount
-            let prepared = installer.processImage(source.imageURL, quarantineSource: source.imageURL, chain: [], approvals: deferred,
+            let prepared = installer.processImage(source.imageURL, rootImageURL: source.imageURL, chain: [], approvals: deferred,
                                                  depth: 0, remainingImages: &remaining, progress: progress,
                                                  replacementCheck: replacementCheck, originalImageIdentity: source.imageIdentity)
             result.installed += prepared.installed
@@ -476,7 +476,7 @@ struct DiskInstaller: Sendable {
 
     /// Stage on the destination filesystem, preserve attributes, then publish with
     /// an exclusive atomic rename, or retain the staged copy for batch confirmation.
-    func installApplication(_ source: URL, imageURL: URL, source deferred: DeferredApplication? = nil,
+    func installApplication(_ source: URL, source deferred: DeferredApplication? = nil,
                             approvedIdentity: FileIdentity? = nil, progress: @Sendable (String) -> Void = { _ in }) throws -> PendingReplacement? {
         let target = destination.appendingPathComponent(source.lastPathComponent)
         if let approvedIdentity {
@@ -507,15 +507,8 @@ struct DiskInstaller: Sendable {
         defer { if !retainStage { try? fm.removeItem(at: stage) } }
         let stagedApp = stage.appendingPathComponent(source.lastPathComponent)
         progress("正在复制 \(source.lastPathComponent)…")
-        _ = try SystemCommand.checked("/usr/bin/ditto", ["--rsrc", "--extattr", "--acl", "--qtn", source.path, stagedApp.path], timeout: 1800)
-        // A download's quarantine may be on the DMG rather than its contents.
-        let quarantine = try SystemCommand.run("/usr/bin/xattr", ["-px", "com.apple.quarantine", imageURL.path], timeout: 30)
-        if quarantine.status == 0 {
-            let value = String(decoding: quarantine.output, as: UTF8.self).filter { !$0.isWhitespace }
-            if !value.isEmpty {
-                _ = try SystemCommand.checked("/usr/bin/xattr", ["-wx", "com.apple.quarantine", value, stagedApp.path], timeout: 30)
-            }
-        }
+        // Copy the app as supplied; do not overwrite its metadata with the DMG's.
+        try fm.copyItem(at: source, to: stagedApp)
         if let approvedIdentity {
             guard try FileIdentity.read(target) == approvedIdentity else {
                 throw InstallFailure(message: "复制期间目标应用发生变化，已保留现有版本。")

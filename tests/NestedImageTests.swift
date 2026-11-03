@@ -46,7 +46,10 @@ enum NestedImageTests {
         try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binary.path)
         let info: [String: String] = ["CFBundleIdentifier": "test.dropinstall.nested", "CFBundlePackageType": "APPL", "CFBundleExecutable": "NestedDemo"]
         try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0).write(to: payload.deletingLastPathComponent().appendingPathComponent("Info.plist"))
+        let appQuarantine = "0081;00000003;NestedPayloadMetadata;"
+        _ = try SystemCommand.checked("/usr/bin/xattr", ["-w", "com.apple.quarantine", appQuarantine, root.appendingPathComponent("payload/Nested Demo.app").path])
         let inner = try image("Inner 中文 [test]", source: root.appendingPathComponent("payload"))
+        let mountedQuarantine = try InstallerTests.payloadQuarantine(inner, appName: "Nested Demo.app")
         let manual = try folder("outer-source/Manual install")
         let innerCopy = manual.appendingPathComponent("Inner 中文 [test].DMG")
         try fm.copyItem(at: inner, to: innerCopy)
@@ -76,7 +79,7 @@ enum NestedImageTests {
         check(report.nestedImages == [innerCopy.lastPathComponent] && report.imageInTrash != nil && report.imageTrashError == nil, "only the outer DMG is moved to Trash after nested success")
         try fm.moveItem(at: report.imageInTrash!, to: outer)
         let xattr = try SystemCommand.checked("/usr/bin/xattr", ["-p", "com.apple.quarantine", destination.appendingPathComponent("Nested Demo.app").path])
-        check(String(decoding: xattr, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) == quarantine, "outer download quarantine preserved on nested app")
+        check(String(decoding: xattr, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) == mountedQuarantine, "nested payload metadata is not overwritten with outer DMG quarantine")
         check(!fm.fileExists(atPath: marker.path), "embedded helper scripts are never executed")
 
         let model = AppModel(destination: destination)
